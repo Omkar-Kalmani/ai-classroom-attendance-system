@@ -2,57 +2,78 @@ const axios = require('axios');
 
 // ─────────────────────────────────────────────────────────────
 //  AI Service
-//  This module is the bridge between Node.js and the Python
-//  FastAPI AI microservice running on port 8000.
+//  Bridge between Node.js and Python FastAPI microservice.
 //
-//  Node.js never does any AI processing itself.
-//  It just sends the video path to Python and handles callbacks.
+//  Flow:
+//    1. Node.js calls processVideo()
+//    2. We POST to Python /api/ai/process
+//    3. Python processes video (can take minutes)
+//    4. Python returns results
+//    5. We call onProgress during processing
+//    6. We call onComplete with final results
 // ─────────────────────────────────────────────────────────────
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
 
-// Axios instance with timeout for AI service calls
 const aiAxios = axios.create({
   baseURL: AI_SERVICE_URL,
-  timeout: 3600000,   // 1 hour — large videos can take a long time
+  timeout: 3600000, // 1 hour timeout for large videos
 });
 
 // ─────────────────────────────────────────────────────────────
 //  processVideo
-//  Sends a POST request to the Python AI service to start processing.
-//  The Python service will:
-//    1. Extract frames from the video
-//    2. Detect + track students
-//    3. Score engagement per frame
-//    4. Return final results
-//
-//  This function is called AFTER the HTTP response is sent to the
-//  teacher's browser, so it runs in the background.
+//  Sends video to Python AI service and handles results.
+//  Called AFTER HTTP response is sent — runs in background.
 // ─────────────────────────────────────────────────────────────
-const processVideo = async ({ sessionId, videoPath, engagementThreshold, onProgress, onComplete, onError }) => {
+const processVideo = async ({
+  sessionId,
+  videoPath,
+  engagementThreshold,
+  onProgress,
+  onComplete,
+  onError,
+}) => {
   try {
-    console.log(`🤖 Sending video to AI service: session ${sessionId}`);
+    console.log(`🤖 Starting AI processing for session: ${sessionId}`);
+    console.log(`📹 Video path: ${videoPath}`);
 
-    // Call the Python AI microservice
+    // Simulate early progress so frontend shows activity immediately
+    onProgress(5, 0);
+
+    // ── Call Python AI service ─────────────────────────────
     const response = await aiAxios.post('/api/ai/process', {
       session_id: sessionId,
       video_path: videoPath,
       engagement_threshold: engagementThreshold || 70,
-      frame_score_threshold: 0.6,
+      frame_score_threshold: parseFloat(process.env.FRAME_SCORE_THRESHOLD) || 0.6,
       processing_fps: parseInt(process.env.PROCESSING_FPS) || 5,
     });
 
     const { data } = response;
 
-    if (data.success) {
-      console.log(`✅ AI processing complete for session ${sessionId}`);
+    if (data.success && data.results) {
+      console.log(`✅ AI processing complete for session: ${sessionId}`);
+      console.log(`   Students found: ${data.results.students.length}`);
+      onProgress(100, data.results.students.length);
       onComplete(data.results);
     } else {
-      throw new Error(data.message || 'AI service returned an error');
+      throw new Error(data.message || 'AI service returned no results');
     }
 
   } catch (error) {
-    const message = error.response?.data?.message || error.message || 'AI service unavailable';
+    // Extract the most useful error message
+    let message = 'AI processing failed';
+
+    if (error.code === 'ECONNREFUSED') {
+      message = 'AI service is not running. Please start the Python service.';
+    } else if (error.code === 'ETIMEDOUT') {
+      message = 'AI processing timed out. Try a shorter video.';
+    } else if (error.response?.data?.detail) {
+      message = error.response.data.detail;
+    } else if (error.message) {
+      message = error.message;
+    }
+
     console.error(`❌ AI service error for session ${sessionId}:`, message);
     onError(message);
   }
@@ -61,16 +82,17 @@ const processVideo = async ({ sessionId, videoPath, engagementThreshold, onProgr
 // ─────────────────────────────────────────────────────────────
 //  checkHealth
 //  Called on server startup to verify AI service is reachable.
-//  If it fails, log a warning (don't crash — AI service might start later).
 // ─────────────────────────────────────────────────────────────
 const checkHealth = async () => {
   try {
     const response = await aiAxios.get('/api/ai/health', { timeout: 5000 });
     if (response.data.status === 'ok') {
       console.log('✅  AI service is reachable and healthy');
+      return true;
     }
   } catch {
     console.warn('⚠️   AI service is not reachable. Start it before processing videos.');
+    return false;
   }
 };
 
