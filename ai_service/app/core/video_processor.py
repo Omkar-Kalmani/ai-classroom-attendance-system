@@ -1,36 +1,25 @@
 import cv2
 import mediapipe as mp
 import numpy as np
-from typing import Callable, Optional
+from typing import Callable, Optional, List
 
 from .tracker import StudentTracker
 from .eye_state import calculate_eye_open_score
 from .head_pose import calculate_head_pose_score
 from .gaze import calculate_gaze_score
 from .engagement import calculate_frame_score, calculate_body_orientation
+from .face_identifier import FaceIdentifier
 
 
 # ─────────────────────────────────────────────────────────────
-#  Video Processor
-#  The main orchestrator — ties together all AI components.
+#  Updated Video Processor
+//  Now includes face recognition to identify students by name/PRN
 #
-#  Processing pipeline per frame:
-#    1. Read frame from video
-#    2. Detect all faces with MediaPipe
-#    3. For each detected face:
-#       a. Calculate gaze score
-#       b. Calculate head pose score
-#       c. Calculate eye open score
-#       d. Calculate face visibility score
-#       e. Calculate body orientation score
-#       f. Calculate weighted frame score
-#    4. Pass detections to tracker (assigns persistent IDs)
-#    5. Report progress every 5%
-#
-#  After all frames:
-#    6. Calculate final engagement scores per student
-#    7. Determine attendance status
-#    8. Return results to Node.js
+#  Key change from Step 3:
+#    Before: each face gets "Student #1", "Student #2" (anonymous)
+#    Now:    each face gets matched to registered student database
+#            → "Rahul Sharma (PRN: 2021CS001)" if matched
+#            → "Unknown #1" if not matched
 # ─────────────────────────────────────────────────────────────
 
 
@@ -41,19 +30,29 @@ class VideoProcessor:
         frame_score_threshold: float = 0.6,
         engagement_threshold: float = 70.0,
     ):
-        self.processing_fps = processing_fps
+        self.processing_fps        = processing_fps
         self.frame_score_threshold = frame_score_threshold
-        self.engagement_threshold = engagement_threshold
+        self.engagement_threshold  = engagement_threshold
 
-        # Initialize MediaPipe Face Mesh
+        # MediaPipe Face Mesh
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=False,        # Video mode — uses tracking internally
-            max_num_faces=50,               # Support up to 50 students per frame
-            refine_landmarks=True,          # Include iris landmarks (needed for gaze)
+            static_image_mode=False,
+            max_num_faces=50,
+            refine_landmarks=True,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
+
+        # Face identifier — loaded with registered students before processing
+        self.identifier = FaceIdentifier()
+
+    def load_registered_students(self, students: List[dict]):
+        """
+        Load registered students before processing video.
+        Called by the route handler with data from MongoDB.
+        """
+        self.identifier.load_students(students)
 
     def process(
         self,
@@ -61,44 +60,31 @@ class VideoProcessor:
         on_progress: Optional[Callable] = None,
     ) -> dict:
         """
-        Process a video file and return engagement results.
-
-        Args:
-            video_path: absolute path to the video file
-            on_progress: optional callback(progress_percent, students_found)
-
-        Returns:
-            {
-                'students': [...],
-                'video_duration_sec': float,
-                'total_frames_processed': int,
-                'processing_fps': int,
-            }
+        Process video and return engagement results with student identities.
         """
         cap = cv2.VideoCapture(video_path)
 
         if not cap.isOpened():
             raise ValueError(f"Cannot open video file: {video_path}")
 
-        # ── Video metadata ─────────────────────────────────────
         video_fps          = cap.get(cv2.CAP_PROP_FPS) or 30
         total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         video_duration_sec = total_video_frames / video_fps
+        frame_skip         = max(1, int(video_fps / self.processing_fps))
 
-        # How many video frames to skip between each processed frame
-        # e.g. video at 30fps, processing at 5fps → skip every 6 frames
-        frame_skip = max(1, int(video_fps / self.processing_fps))
+        tracker          = StudentTracker()
+        tracker.frame_sample_rate = max(1, self.processing_fps * 2)
 
-        # ── Initialize tracker ─────────────────────────────────
-        tracker = StudentTracker()
-        tracker.frame_sample_rate = max(1, self.processing_fps * 2)  # Sample every 2 seconds
+        frame_idx       = 0
+        processed_count = 0
+        last_progress   = -1
 
-        frame_idx         = 0    # Total frames read from video
-        processed_count   = 0    # Frames we actually analyzed
-        last_progress     = -1   # Track last reported progress
+        # How often to run face recognition (every N processed frames)
+        # Running every frame is slow — every 10 frames is fast enough
+        RECOGNITION_INTERVAL = 10
 
-        print(f"📹 Video: {video_duration_sec:.1f}s, {video_fps:.0f}fps, {total_video_frames} frames")
-        print(f"⚙️  Processing at {self.processing_fps}fps (analyzing every {frame_skip} frames)")
+        print(f"📹 Video: {video_duration_sec:.1f}s | Processing at {self.processing_fps}fps")
+        print(f"👥 Registered students loaded: {len(self.identifier.known_students)}")
 
         try:
             while cap.isOpened():
@@ -107,14 +93,19 @@ class VideoProcessor:
                     break
 
                 frame_idx += 1
-
-                # Skip frames to match desired processing FPS
                 if frame_idx % frame_skip != 0:
                     continue
 
-                # ── Process this frame ─────────────────────────
+                h, w = frame.shape[:2]
                 timestamp_sec = frame_idx / video_fps
-                detections = self._process_frame(frame, processed_count, timestamp_sec)
+
+                # Run face recognition every RECOGNITION_INTERVAL frames
+                run_recognition = (processed_count % RECOGNITION_INTERVAL == 0)
+
+                detections = self._process_frame(
+                    frame, processed_count, timestamp_sec,
+                    w, h, run_recognition
+                )
 
                 tracker.update(
                     frame_no=processed_count,
@@ -125,15 +116,11 @@ class VideoProcessor:
 
                 processed_count += 1
 
-                # ── Report progress every 5% ───────────────────
+                # Report progress
                 progress = int((frame_idx / total_video_frames) * 100)
                 if progress != last_progress and progress % 5 == 0:
                     last_progress = progress
-                    students_found = len([
-                        t for t in tracker.tracks.values()
-                        if t.total_frames >= 5
-                    ])
-                    print(f"   Progress: {progress}% | Students found: {students_found}")
+                    students_found = len([t for t in tracker.tracks.values() if t.total_frames >= 5])
                     if on_progress:
                         on_progress(progress, students_found)
 
@@ -141,10 +128,9 @@ class VideoProcessor:
             cap.release()
             self.face_mesh.close()
 
-        # ── Get final results ──────────────────────────────────
         students = tracker.get_results(self.engagement_threshold)
 
-        print(f"✅ Processing complete: {len(students)} students, {processed_count} frames analyzed")
+        print(f"✅ Done: {len(students)} students, {processed_count} frames")
 
         return {
             'students':               students,
@@ -153,18 +139,11 @@ class VideoProcessor:
             'processing_fps':         self.processing_fps,
         }
 
-    def _process_frame(self, frame, frame_no: int, timestamp_sec: float) -> list:
-        """
-        Detect all faces in one frame and calculate engagement signals.
+    def _process_frame(self, frame, frame_no, timestamp_sec, w, h, run_recognition):
+        """Process one frame — detect faces, score signals, identify students."""
 
-        Returns:
-            List of (bbox, signals_dict, frame_score) for each detected face
-        """
-        h, w = frame.shape[:2]
-
-        # Convert BGR (OpenCV) to RGB (MediaPipe requirement)
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.face_mesh.process(rgb_frame)
+        results   = self.face_mesh.process(rgb_frame)
 
         if not results.multi_face_landmarks:
             return []
@@ -173,7 +152,7 @@ class VideoProcessor:
 
         for face_landmarks in results.multi_face_landmarks:
             try:
-                # ── Calculate bounding box ─────────────────────
+                # ── Bounding box ───────────────────────────
                 x_coords = [lm.x for lm in face_landmarks.landmark]
                 y_coords = [lm.y for lm in face_landmarks.landmark]
                 bbox = (
@@ -183,16 +162,11 @@ class VideoProcessor:
                     min(1.0, max(y_coords) + 0.02),
                 )
 
-                # ── Calculate face visibility score ────────────
-                # Use landmark detection confidence as proxy
-                # A fully visible face has tightly packed landmarks
-                face_width  = max(x_coords) - min(x_coords)
-                face_height = max(y_coords) - min(y_coords)
-                face_area   = face_width * face_height
-                # Normalize: typical face area in classroom ≈ 0.01 - 0.05
+                # ── Face visibility score ──────────────────
+                face_area         = (max(x_coords) - min(x_coords)) * (max(y_coords) - min(y_coords))
                 face_visible_score = min(1.0, max(0.0, face_area / 0.04))
 
-                # ── Calculate all 5 engagement signals ─────────
+                # ── 5 engagement signals ───────────────────
                 signals = {
                     'gaze':         calculate_gaze_score(face_landmarks, w, h),
                     'head_pose':    calculate_head_pose_score(face_landmarks, w, h),
@@ -201,13 +175,16 @@ class VideoProcessor:
                     'body_orient':  calculate_body_orientation(face_landmarks, w, h),
                 }
 
-                # ── Calculate weighted frame score ─────────────
                 frame_score = calculate_frame_score(signals)
 
-                detections.append((bbox, signals, frame_score))
+                # ── Face recognition (every N frames) ─────
+                identity = None
+                if run_recognition:
+                    identity = self.identifier.identify_from_frame(frame, bbox, w, h)
 
-            except Exception as e:
-                # Skip this face if any calculation fails
+                detections.append((bbox, signals, frame_score, identity))
+
+            except Exception:
                 continue
 
         return detections
