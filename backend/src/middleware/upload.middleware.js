@@ -3,85 +3,91 @@ const path = require('path');
 const fs = require('fs');
 
 // ─────────────────────────────────────────────────────────────
-//  Ensure the uploads directory exists
+//  Upload Middleware
+//  Handles both VIDEO uploads (sessions) and PHOTO uploads (students)
 // ─────────────────────────────────────────────────────────────
-const uploadDir = process.env.UPLOAD_DIR || 'uploads';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
 
-// ─────────────────────────────────────────────────────────────
-//  Storage — where and how to save the file on disk
-// ─────────────────────────────────────────────────────────────
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
+// Ensure upload directories exist
+const VIDEO_DIR = process.env.UPLOAD_DIR || 'uploads/videos';
+const PHOTO_DIR = 'uploads/photos';
+[VIDEO_DIR, PHOTO_DIR].forEach(dir => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
 
-  filename: (req, file, cb) => {
-    // Generate unique filename: timestamp-originalname
-    // e.g. "1709123456789-classroom-video.mp4"
-    const uniqueName = `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`;
-    cb(null, uniqueName);
+// ── Video Storage ──────────────────────────────────────────
+const videoStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, VIDEO_DIR),
+  filename:    (req, file, cb) => {
+    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    cb(null, `${unique}-${file.originalname}`);
   },
 });
 
-// ─────────────────────────────────────────────────────────────
-//  File filter — only allow video formats
-// ─────────────────────────────────────────────────────────────
-const fileFilter = (req, file, cb) => {
-  const allowedMimeTypes = [
-    'video/mp4',
-    'video/avi',
-    'video/quicktime',    // .mov
-    'video/x-matroska',   // .mkv
-    'video/webm',
-  ];
-
-  const allowedExtensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm'];
-  const ext = path.extname(file.originalname).toLowerCase();
-
-  if (allowedMimeTypes.includes(file.mimetype) && allowedExtensions.includes(ext)) {
-    cb(null, true);   // Accept the file
+const videoFilter = (req, file, cb) => {
+  const allowed = ['video/mp4', 'video/avi', 'video/quicktime', 'video/x-matroska', 'video/webm'];
+  if (allowed.includes(file.mimetype)) {
+    cb(null, true);
   } else {
-    cb(
-      new Error('Invalid file type. Only MP4, AVI, MOV, MKV, and WEBM videos are allowed.'),
-      false
-    );
+    cb(new Error('Only video files are allowed (mp4, avi, mov, mkv, webm)'), false);
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-//  Multer instance
-// ─────────────────────────────────────────────────────────────
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: {
-    fileSize: (parseInt(process.env.MAX_VIDEO_SIZE_MB) || 500) * 1024 * 1024, // Convert MB to bytes
+// ── Photo Storage ──────────────────────────────────────────
+const photoStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, PHOTO_DIR),
+  filename:    (req, file, cb) => {
+    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    const ext = path.extname(file.originalname);
+    cb(null, `student-${unique}${ext}`);
   },
 });
 
-// ─────────────────────────────────────────────────────────────
-//  Error handler specifically for Multer errors
-//  Attach after upload middleware in routes
-// ─────────────────────────────────────────────────────────────
-const handleUploadError = (err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({
-        success: false,
-        message: `File too large. Maximum size is ${process.env.MAX_VIDEO_SIZE_MB || 500}MB.`,
-      });
-    }
-    return res.status(400).json({ success: false, message: err.message });
+const photoFilter = (req, file, cb) => {
+  const allowed = ['image/jpeg', 'image/jpg', 'image/png'];
+  if (allowed.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only JPG and PNG photos are allowed'), false);
   }
-
-  if (err) {
-    return res.status(400).json({ success: false, message: err.message });
-  }
-
-  next();
 };
 
-module.exports = { upload, handleUploadError };
+// ── Multer instances ───────────────────────────────────────
+const maxVideoSize = parseInt(process.env.MAX_VIDEO_SIZE_MB || 500) * 1024 * 1024;
+
+const uploadVideo = multer({
+  storage: videoStorage,
+  fileFilter: videoFilter,
+  limits: { fileSize: maxVideoSize },
+}).single('video');
+
+const uploadPhoto = multer({
+  storage: photoStorage,
+  fileFilter: photoFilter,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max for photos
+}).single('photo');
+
+// ── Error wrapper ──────────────────────────────────────────
+const handleUpload = (uploadFn) => (req, res, next) => {
+  uploadFn(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({
+          success: false,
+          message: err.field === 'photo'
+            ? 'Photo must be under 5MB.'
+            : `Video must be under ${process.env.MAX_VIDEO_SIZE_MB || 500}MB.`,
+        });
+      }
+      return res.status(400).json({ success: false, message: err.message });
+    }
+    if (err) {
+      return res.status(400).json({ success: false, message: err.message });
+    }
+    next();
+  });
+};
+
+module.exports = {
+  uploadVideo: handleUpload(uploadVideo),
+  uploadPhoto: handleUpload(uploadPhoto),
+};
