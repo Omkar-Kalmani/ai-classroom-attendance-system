@@ -3,6 +3,7 @@ const fs = require('fs');
 const Session = require('../models/Session.model');
 const Student = require('../models/Student.model');
 const Report = require('../models/Report.model');
+const StudentRegister = require('../models/StudentRegister.model');
 const { createError } = require('../middleware/error.middleware');
 const aiService = require('../services/ai.service');
 const socketService = require('../services/socket.service');
@@ -16,11 +17,7 @@ const getAllSessions = async (req, res, next) => {
       .sort({ createdAt: -1 })
       .select('-__v');
 
-    res.status(200).json({
-      success: true,
-      count: sessions.length,
-      sessions,
-    });
+    res.status(200).json({ success: true, count: sessions.length, sessions });
   } catch (error) {
     next(error);
   }
@@ -28,41 +25,34 @@ const getAllSessions = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────
 //  POST /api/sessions
-//  Create session + upload video
 // ─────────────────────────────────────────────────────────────
 const createSession = async (req, res, next) => {
   try {
     const { name } = req.body;
 
-    if (!name || !name.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Session name is required.',
-      });
+    if (!name?.trim()) {
+      return res.status(400).json({ success: false, message: 'Session name is required.' });
     }
 
     if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'Video file is required.',
-      });
+      return res.status(400).json({ success: false, message: 'Video file is required.' });
     }
 
     const session = await Session.create({
-      teacherId: req.teacher._id,
-      name: name.trim(),
-      videoPath: req.file.path,
-      videoName: req.file.originalname,
-      videoSize: req.file.size,
-      status: 'pending',
+      teacherId:           req.teacher._id,
+      name:                name.trim(),
+      videoPath:           req.file.path,
+      videoName:           req.file.originalname,
+      videoSize:           req.file.size,
+      status:              'pending',
       engagementThreshold: parseInt(process.env.ENGAGEMENT_THRESHOLD) || 70,
     });
 
-    console.log(`📁 Session created: ${session._id} | Video: ${req.file.path}`);
+    console.log(`📁 Session created: ${session._id}`);
 
     res.status(201).json({
       success: true,
-      message: 'Session created successfully. Ready to process.',
+      message: 'Session created. Ready to process.',
       session,
     });
   } catch (error) {
@@ -76,12 +66,9 @@ const createSession = async (req, res, next) => {
 const getSession = async (req, res, next) => {
   try {
     const session = await Session.findOne({
-      _id: req.params.id,
-      teacherId: req.teacher._id,
+      _id: req.params.id, teacherId: req.teacher._id,
     });
-
     if (!session) return next(createError(404, 'Session not found.'));
-
     res.status(200).json({ success: true, session });
   } catch (error) {
     next(error);
@@ -90,17 +77,14 @@ const getSession = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────
 //  GET /api/sessions/:id/status
-//  Lightweight polling endpoint
 // ─────────────────────────────────────────────────────────────
 const getSessionStatus = async (req, res, next) => {
   try {
     const session = await Session.findOne({
-      _id: req.params.id,
-      teacherId: req.teacher._id,
+      _id: req.params.id, teacherId: req.teacher._id,
     }).select('status processingProgress totalStudents avgClassEngagement errorMessage');
 
     if (!session) return next(createError(404, 'Session not found.'));
-
     res.status(200).json({ success: true, ...session.toObject() });
   } catch (error) {
     next(error);
@@ -110,90 +94,82 @@ const getSessionStatus = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────
 //  POST /api/sessions/:id/process
 //  THE MAIN ENDPOINT — triggers full AI pipeline
+//  Now fetches registered students and sends to Python
 // ─────────────────────────────────────────────────────────────
 const processSession = async (req, res, next) => {
   try {
     const session = await Session.findOne({
-      _id: req.params.id,
-      teacherId: req.teacher._id,
+      _id: req.params.id, teacherId: req.teacher._id,
     });
 
     if (!session) return next(createError(404, 'Session not found.'));
 
-    // ── Guard against re-processing ────────────────────────
     if (session.status === 'processing') {
-      return res.status(400).json({
-        success: false,
-        message: 'Session is already being processed.',
-      });
+      return res.status(400).json({ success: false, message: 'Already processing.' });
     }
 
     if (session.status === 'completed') {
-      return res.status(400).json({
-        success: false,
-        message: 'Session already processed. Delete it to reprocess.',
-      });
+      return res.status(400).json({ success: false, message: 'Already completed. Delete to reprocess.' });
     }
 
     // ── Verify video file exists ───────────────────────────
     const videoPath = path.resolve(session.videoPath);
     if (!fs.existsSync(videoPath)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Video file not found on server. Please re-upload.',
-      });
+      return res.status(400).json({ success: false, message: 'Video file not found. Please re-upload.' });
     }
 
-    // ── Update status to processing ────────────────────────
-    session.status = 'processing';
+    // ── Fetch registered students with face encodings ──────
+    // Only fetch students whose encoding is ready
+    const registeredStudents = await StudentRegister.find({
+      teacherId:      req.teacher._id,
+      encodingStatus: 'success',
+    }).select('_id name prn className faceEncoding');
+
+    console.log(`👥 Found ${registeredStudents.length} registered students with face encodings`);
+
+    // ── Update session status ──────────────────────────────
+    session.status             = 'processing';
     session.processingProgress = 0;
-    session.errorMessage = null;
+    session.errorMessage       = null;
     await session.save();
 
-    // ── Respond immediately to teacher ─────────────────────
-    // Don't make teacher wait — processing happens in background
+    // ── Respond immediately ────────────────────────────────
     res.status(200).json({
-      success: true,
-      message: 'Processing started! Watch live progress via WebSocket.',
-      sessionId: session._id,
+      success:            true,
+      message:            `Processing started! ${registeredStudents.length} students registered for identification.`,
+      sessionId:          session._id,
+      registeredStudents: registeredStudents.length,
     });
 
     // ── Start AI processing in background ─────────────────
-    // This runs AFTER the response is sent
     aiService.processVideo({
-      sessionId: session._id.toString(),
+      sessionId:          session._id.toString(),
       videoPath,
       engagementThreshold: session.engagementThreshold,
+      registeredStudents: registeredStudents.map(s => ({
+        _id:          s._id.toString(),
+        name:         s.name,
+        prn:          s.prn,
+        className:    s.className,
+        faceEncoding: s.faceEncoding,
+      })),
 
-      // Called every 5% progress by AI service
       onProgress: async (progress, studentsFound) => {
         try {
-          await Session.findByIdAndUpdate(session._id, {
-            processingProgress: progress,
-          });
-          socketService.emitProgress(
-            session._id.toString(),
-            progress,
-            studentsFound
-          );
+          await Session.findByIdAndUpdate(session._id, { processingProgress: progress });
+          socketService.emitProgress(session._id.toString(), progress, studentsFound);
         } catch (err) {
           console.error('Progress update error:', err.message);
         }
       },
 
-      // Called when AI finishes successfully
       onComplete: async (results) => {
         await handleProcessingComplete(session._id, results, session.engagementThreshold);
       },
 
-      // Called if AI fails
       onError: async (errorMessage) => {
-        await Session.findByIdAndUpdate(session._id, {
-          status: 'failed',
-          errorMessage,
-        });
+        await Session.findByIdAndUpdate(session._id, { status: 'failed', errorMessage });
         socketService.emitError(session._id.toString(), errorMessage);
-        console.error(`❌ Session ${session._id} failed:`, errorMessage);
       },
     });
 
@@ -204,14 +180,14 @@ const processSession = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────
 //  handleProcessingComplete
-//  Saves all results to MongoDB after AI finishes
+//  Saves results to MongoDB after AI finishes
+//  Now includes identified vs unknown student counts
 // ─────────────────────────────────────────────────────────────
 const handleProcessingComplete = async (sessionId, results, engagementThreshold) => {
   try {
     const { students, videoDurationSec } = results;
 
-    console.log(`💾 Saving results for session ${sessionId}...`);
-    console.log(`   Students: ${students.length}`);
+    console.log(`💾 Saving ${students.length} students for session ${sessionId}`);
 
     // ── Save student documents ─────────────────────────────
     const studentDocs = await Student.insertMany(
@@ -219,6 +195,13 @@ const handleProcessingComplete = async (sessionId, results, engagementThreshold)
         sessionId,
         trackId:          s.trackId,
         label:            s.label,
+        // Face recognition fields
+        name:             s.name        || null,
+        prn:              s.prn         || null,
+        className:        s.className   || null,
+        studentDbId:      s.studentDbId || null,
+        identified:       s.identified  || false,
+        // Engagement fields
         totalFrames:      s.totalFrames,
         attentiveFrames:  s.attentiveFrames,
         engagementScore:  s.engagementScore,
@@ -235,42 +218,29 @@ const handleProcessingComplete = async (sessionId, results, engagementThreshold)
     );
 
     // ── Calculate class statistics ─────────────────────────
-    const totalStudents = studentDocs.length;
-    const presentCount  = studentDocs.filter((s) => s.attendanceStatus === 'present').length;
-    const absentCount   = totalStudents - presentCount;
-    const avgEngagement = totalStudents > 0
+    const totalStudents    = studentDocs.length;
+    const presentCount     = studentDocs.filter(s => s.attendanceStatus === 'present').length;
+    const absentCount      = totalStudents - presentCount;
+    const identifiedCount  = studentDocs.filter(s => s.identified).length;
+    const unknownCount     = totalStudents - identifiedCount;
+    const avgEngagement    = totalStudents > 0
       ? studentDocs.reduce((sum, s) => sum + s.engagementScore, 0) / totalStudents
       : 0;
-    const attendanceRate = totalStudents > 0
-      ? Math.round((presentCount / totalStudents) * 100)
-      : 0;
+    const attendanceRate   = totalStudents > 0
+      ? Math.round((presentCount / totalStudents) * 100) : 0;
 
-    // ── Update session to completed ────────────────────────
+    // ── Update session ─────────────────────────────────────
     await Session.findByIdAndUpdate(sessionId, {
-      status:               'completed',
-      processingProgress:   100,
+      status:             'completed',
+      processingProgress: 100,
       totalStudents,
-      avgClassEngagement:   Math.round(avgEngagement * 100) / 100,
+      avgClassEngagement: Math.round(avgEngagement * 100) / 100,
       videoDurationSec,
-      completedAt:          new Date(),
+      completedAt:        new Date(),
     });
 
     // ── Create report ──────────────────────────────────────
     const sorted = [...studentDocs].sort((a, b) => b.engagementScore - a.engagementScore);
-
-    const topStudents = sorted.slice(0, 3).map((s) => ({
-      trackId:         s.trackId,
-      label:           s.label,
-      engagementScore: s.engagementScore,
-    }));
-
-    const lowFocusStudents = sorted
-      .filter((s) => s.attendanceStatus === 'absent')
-      .map((s) => ({
-        trackId:         s.trackId,
-        label:           s.label,
-        engagementScore: s.engagementScore,
-      }));
 
     await Report.create({
       sessionId,
@@ -280,21 +250,39 @@ const handleProcessingComplete = async (sessionId, results, engagementThreshold)
         absentCount,
         attendanceRate,
         classEngagementAvg: Math.round(avgEngagement * 100) / 100,
+        identifiedCount,
+        unknownCount,
       },
-      topStudents,
-      lowFocusStudents,
+      topStudents: sorted.slice(0, 3).map(s => ({
+        trackId:         s.trackId,
+        label:           s.label,
+        name:            s.name,
+        prn:             s.prn,
+        engagementScore: s.engagementScore,
+      })),
+      lowFocusStudents: sorted
+        .filter(s => s.attendanceStatus === 'absent')
+        .map(s => ({
+          trackId:         s.trackId,
+          label:           s.label,
+          name:            s.name,
+          prn:             s.prn,
+          engagementScore: s.engagementScore,
+        })),
     });
 
-    // ── Notify frontend ────────────────────────────────────
+    // ── Notify frontend via Socket.IO ──────────────────────
     socketService.emitComplete(sessionId.toString(), {
       totalStudents,
       avgClassEngagement: Math.round(avgEngagement * 100) / 100,
       presentCount,
+      absentCount,
+      identifiedCount,
+      unknownCount,
     });
 
     console.log(`✅ Session ${sessionId} complete!`);
-    console.log(`   Present: ${presentCount}/${totalStudents} (${attendanceRate}%)`);
-    console.log(`   Avg engagement: ${Math.round(avgEngagement)}%`);
+    console.log(`   Present: ${presentCount}/${totalStudents} | Identified: ${identifiedCount}/${totalStudents}`);
 
   } catch (err) {
     console.error('❌ Error saving results:', err);
@@ -312,27 +300,19 @@ const handleProcessingComplete = async (sessionId, results, engagementThreshold)
 const deleteSession = async (req, res, next) => {
   try {
     const session = await Session.findOne({
-      _id: req.params.id,
-      teacherId: req.teacher._id,
+      _id: req.params.id, teacherId: req.teacher._id,
     });
-
     if (!session) return next(createError(404, 'Session not found.'));
 
-    // Delete video file from disk
     if (session.videoPath && fs.existsSync(session.videoPath)) {
       fs.unlinkSync(session.videoPath);
-      console.log(`🗑️  Deleted video: ${session.videoPath}`);
     }
 
-    // Delete all related data
     await Student.deleteMany({ sessionId: session._id });
     await Report.deleteOne({ sessionId: session._id });
     await session.deleteOne();
 
-    res.status(200).json({
-      success: true,
-      message: 'Session and all related data deleted.',
-    });
+    res.status(200).json({ success: true, message: 'Session deleted.' });
   } catch (error) {
     next(error);
   }

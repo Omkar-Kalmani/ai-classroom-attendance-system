@@ -1,6 +1,6 @@
 const express = require('express');
 const { protect } = require('../middleware/auth.middleware');
-const { upload, handleUploadError } = require('../middleware/upload.middleware');
+const { uploadVideo } = require('../middleware/upload.middleware');
 const {
   getAllSessions, createSession, getSession,
   getSessionStatus, processSession, deleteSession,
@@ -14,16 +14,16 @@ const router = express.Router();
 router.use(protect);
 
 router.get('/',    getAllSessions);
-router.post('/',   upload.single('video'), handleUploadError, createSession);
+router.post('/',   uploadVideo, createSession);
 router.get('/:id', getSession);
 router.delete('/:id', deleteSession);
 
 router.get('/:id/status',  getSessionStatus);
 router.post('/:id/process', processSession);
 
-router.get('/:id/results',              getResults);
-router.get('/:id/results/:studentId',   getStudentDetail);
-router.get('/:id/analytics',            getAnalytics);
+router.get('/:id/results',            getResults);
+router.get('/:id/results/:studentId', getStudentDetail);
+router.get('/:id/analytics',          getAnalytics);
 
 router.get('/:id/report/pdf', downloadPDF);
 router.get('/:id/report/csv', downloadCSV);
