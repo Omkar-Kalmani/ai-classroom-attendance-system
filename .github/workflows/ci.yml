@@ -20,7 +20,7 @@ jobs:
         run: npm ci
       - name: Check syntax
         working-directory: ./backend
-        run: node --check server.js && echo "✅ Backend OK"
+        run: node --check server.js && echo "Backend OK"
 
   ai-test:
     name: AI Service — Python Tests
@@ -37,7 +37,7 @@ jobs:
         run: |
           python -m py_compile app/main.py
           python -m py_compile app/routes/process.py
-          echo "✅ AI Service OK"
+          echo "AI Service OK"
 
   frontend-test:
     name: Frontend — React Build
@@ -55,4 +55,4 @@ jobs:
         env:
           VITE_API_URL: http://localhost:5000/api
           VITE_SOCKET_URL: http://localhost:5000
-        run: npm run build && echo "✅ Frontend OK"
+        run: npm run build && echo "Frontend OK"
