@@ -1,0 +1,98 @@
+version: '3.8'
+
+# ─────────────────────────────────────────────────────────────
+#  Docker Compose — AI Classroom Attendance System
+#  Starts all 4 services with one command: docker-compose up
+#
+#  Services:
+#    mongodb   → Database (port 27017)
+#    ai        → Python FastAPI (port 8000)
+#    backend   → Node.js Express (port 5000)
+#    frontend  → React Vite (port 5173)
+# ─────────────────────────────────────────────────────────────
+
+services:
+
+  # ── MongoDB ───────────────────────────────────────────────
+  mongodb:
+    image: mongo:6
+    container_name: classroom-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: classroom_attendance
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Python AI Service ─────────────────────────────────────
+  ai:
+    build:
+      context: ./ai_service
+      dockerfile: Dockerfile
+    container_name: classroom-ai
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads   # Shared uploads folder with backend
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - mongodb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/ai/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Node.js Backend ───────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: classroom-backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./uploads:/app/uploads   # Shared uploads folder with AI service
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - MONGODB_URI=mongodb://mongodb:27017/classroom_attendance
+      - AI_SERVICE_URL=http://ai:8000
+      - CLIENT_URL=http://localhost:5173
+      - JWT_SECRET=${JWT_SECRET:-your_super_secret_jwt_key_change_in_production}
+      - JWT_EXPIRES_IN=7d
+      - MAX_VIDEO_SIZE_MB=500
+      - ENGAGEMENT_THRESHOLD=70
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      ai:
+        condition: service_healthy
+
+  # ── React Frontend ────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: classroom-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"   # Nginx serves built React app on port 80 inside container
+    environment:
+      - VITE_API_URL=http://localhost:5000/api
+      - VITE_SOCKET_URL=http://localhost:5000
+    depends_on:
+      - backend
+
+volumes:
+  mongodb_data:
+    driver: local
