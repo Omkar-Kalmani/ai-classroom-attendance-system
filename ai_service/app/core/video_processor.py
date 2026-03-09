@@ -13,7 +13,7 @@ from .face_identifier import FaceIdentifier
 
 # ─────────────────────────────────────────────────────────────
 #  Updated Video Processor
-//  Now includes face recognition to identify students by name/PRN
+#  Now includes face recognition to identify students by name/PRN
 #
 #  Key change from Step 3:
 #    Before: each face gets "Student #1", "Student #2" (anonymous)
@@ -72,7 +72,7 @@ class VideoProcessor:
         video_duration_sec = total_video_frames / video_fps
         frame_skip         = max(1, int(video_fps / self.processing_fps))
 
-        tracker          = StudentTracker()
+        tracker = StudentTracker()
         tracker.frame_sample_rate = max(1, self.processing_fps * 2)
 
         frame_idx       = 0
@@ -116,7 +116,7 @@ class VideoProcessor:
 
                 processed_count += 1
 
-                # Report progress
+                # Report progress every 5%
                 progress = int((frame_idx / total_video_frames) * 100)
                 if progress != last_progress and progress % 5 == 0:
                     last_progress = progress
@@ -152,7 +152,7 @@ class VideoProcessor:
 
         for face_landmarks in results.multi_face_landmarks:
             try:
-                # ── Bounding box ───────────────────────────
+                # Bounding box
                 x_coords = [lm.x for lm in face_landmarks.landmark]
                 y_coords = [lm.y for lm in face_landmarks.landmark]
                 bbox = (
@@ -162,11 +162,11 @@ class VideoProcessor:
                     min(1.0, max(y_coords) + 0.02),
                 )
 
-                # ── Face visibility score ──────────────────
-                face_area         = (max(x_coords) - min(x_coords)) * (max(y_coords) - min(y_coords))
+                # Face visibility score
+                face_area          = (max(x_coords) - min(x_coords)) * (max(y_coords) - min(y_coords))
                 face_visible_score = min(1.0, max(0.0, face_area / 0.04))
 
-                # ── 5 engagement signals ───────────────────
+                # 5 engagement signals
                 signals = {
                     'gaze':         calculate_gaze_score(face_landmarks, w, h),
                     'head_pose':    calculate_head_pose_score(face_landmarks, w, h),
@@ -177,7 +177,7 @@ class VideoProcessor:
 
                 frame_score = calculate_frame_score(signals)
 
-                # ── Face recognition (every N frames) ─────
+                # Face recognition every N frames
                 identity = None
                 if run_recognition:
                     identity = self.identifier.identify_from_frame(frame, bbox, w, h)
