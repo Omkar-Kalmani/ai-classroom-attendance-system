@@ -64,12 +64,8 @@ jobs:
           AI_SERVICE_URL: http://localhost:8000
           PORT: 5000
         run: |
-          # Run tests if they exist, otherwise just verify startup
-          if [ -f "package.json" ] && grep -q '"test"' package.json; then
-            npm test
-          else
-            echo "No tests defined yet — skipping"
-          fi
+          # Run tests with --passWithNoTests so empty test suite doesn't fail
+            npm test -- --passWithNoTests
 
       - name: Verify all routes load
         working-directory: ./backend
