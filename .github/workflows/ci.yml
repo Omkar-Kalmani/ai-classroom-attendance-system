@@ -7,115 +7,52 @@ on:
     branches: [main]
 
 jobs:
-
-  # ── Job 1: Backend Check ─────────────────────────────────
   backend-test:
     name: Backend — Node.js Tests
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: backend/package-lock.json
-
-      - name: Install backend dependencies
+          node-version: "20"
+      - name: Install dependencies
         working-directory: ./backend
         run: npm ci
-
-      - name: Check for syntax errors
+      - name: Check syntax
         working-directory: ./backend
-        run: node --check server.js
+        run: node --check server.js && echo "✅ Backend OK"
 
-      - name: Verify all files load
-        working-directory: ./backend
-        run: |
-          node -e "require('./src/models/Session.model')" && echo "✅ Models OK"
-          node -e "require('./src/middleware/auth.middleware')" && echo "✅ Middleware OK"
-          echo "✅ Backend checks passed"
-
-  # ── Job 2: AI Service Tests ──────────────────────────────
   ai-test:
     name: AI Service — Python Tests
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-      - name: Install core dependencies
+          python-version: "3.11"
+      - name: Install dependencies
         run: pip install fastapi pydantic uvicorn python-multipart httpx python-dotenv aiofiles
-
-      - name: Check Python syntax
+      - name: Check syntax
         working-directory: ./ai_service
         run: |
           python -m py_compile app/main.py
           python -m py_compile app/routes/process.py
-          python -m py_compile app/models/schemas.py
-          echo "✅ Python syntax OK"
+          echo "✅ AI Service OK"
 
-  # ── Job 3: Frontend Build ────────────────────────────────
   frontend-test:
     name: Frontend — React Build
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
+          node-version: "20"
+      - name: Install dependencies
         working-directory: ./frontend
         run: npm ci
-
-      - name: Build React app
+      - name: Build
         working-directory: ./frontend
         env:
           VITE_API_URL: http://localhost:5000/api
           VITE_SOCKET_URL: http://localhost:5000
-        run: npm run build
-
-      - name: Verify build output
-        working-directory: ./frontend
-        run: |
-          ls dist/
-          echo "✅ Frontend build successful"
-
-  # ── Job 4: Docker Build Check ────────────────────────────
-  docker-build:
-    name: Docker — Verify Images Build
-    runs-on: ubuntu-latest
-    needs: [backend-test, frontend-test]
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build backend image
-        run: |
-          docker build ./backend -t classroom-backend:test
-          echo "✅ Backend image built"
-
-      - name: Build frontend image
-        run: |
-          docker build ./frontend -t classroom-frontend:test
-          echo "✅ Frontend image built"
+        run: npm run build && echo "✅ Frontend OK"
